@@ -1,0 +1,1237 @@
+---
+title: "Linear Regression Zillow Code"
+author: "Anant Agarwal, Arpita Jena, Asmita Vikas, Deena Liz John"
+date: "10/3/2017"
+output: pdf_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(eval = FALSE)
+knitr::opts_chunk$set(warnings = FALSE)
+knitr::opts_chunk$set(results = 'asis')
+knitr::opts_chunk$set(results = 'hide')
+```
+
+```{r libraries, include = F}
+library(rpart)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(data.table)
+library(knitr)
+library(corrplot)
+library(scales)
+library(leaps)
+library(cvTools)
+library(mice)
+library(e1071) 
+library(caret)
+library(glmnet)
+library(magrittr)
+library(DAAG)
+library(lmtest)
+library(sos)
+library(MASS)
+library(mctest)
+options(scipen=10000)
+```
+
+##Part 1: Exploratory Data Analysis  
+Let us try and understand how our data looks like, before we do any analysis or try to make inferences.
+
+###1.1 Loading the data into a dataframe
+```{r}
+file <-  "/Users/Asmita/Documents/USF/Fall_Mod_1/MSAN601/Regression-Analysis/Case\ Study/housing.txt"
+data.zillow <- read.table(file, sep = ",", header = T, stringsAsFactors = F)
+
+# making copy of data, so that the original data for analysis is not affected
+data.eda <- data.zillow 
+
+```
+
+###1.2 Check for NAs
+```{r}
+na_count <-sapply(data.eda, function(y) sum(length(which(is.na(y)))))
+na_count <- data.frame(na_count)
+na_count <- add_rownames(na_count, "Column")
+na_count$notNulls = nrow(data.eda) - na_count$na_count
+na_count %>% 
+  filter(na_count > 0) %>%
+  gather("null_flag", "count", -Column) %>%
+  ggplot(aes(x = Column, y = count, fill = null_flag)) +
+  geom_bar(stat = "identity",position = "fill") +
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+```
+Wow! too many NAs. Going back to the data description, we see that for most of the catagorical values, a NA signifies that facility unavailable on the site. Example, PoolQC = NA means no pool. We will substitute them with Not Present later.  
+
+###1.3 Sales Type per month
+```{r}
+#Changing month names
+data.eda$MoSold <- as.factor(data.eda$MoSold)
+levels(data.eda$MoSold) <- c("Jan","Feb", "Mar", "Apr", "May", "Jun",
+                             "Jul","Aug", "Sep", "Oct", "Nov", "Dec")
+
+#Mutating month-year column
+data.eda %<>% mutate(
+month_year = paste(YrSold, MoSold, sep = "/")
+)
+
+#Visualizing sales type data with month and year
+data.eda %>%
+    add_count(month_year, SaleType) %>% 
+        ggplot() + geom_bar(mapping = aes(x = month_year, fill = SaleType, y = n), 
+                            stat = "identity", position = "dodge") + 
+  scale_fill_discrete(name = "Sales Type") + xlab("Month and Year Sold") + 
+  ylab("Count") +  theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5)) +
+  coord_flip() + theme_classic()
+
+#Same plot after filtering for the less numerous sales types
+data.eda %>%
+      filter(!(SaleType %in% c("WD", "Oth", "New", "CWD"))) %>% 
+      add_count(month_year, SaleType) %>% 
+        ggplot() + geom_bar(mapping = aes(x = month_year, fill = SaleType, y = n), 
+                            stat = "identity", position = "dodge") + 
+  scale_fill_discrete(name = "Sales Type") + xlab("Month and Year Sold") + 
+  ylab("Count") +  theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5)) +
+  coord_flip()+
+    theme(axis.text.x = element_text(angle = 60, vjust = 1)) +
+    theme(legend.title.align=0.5) +
+    theme_bw()
+
+```
+
+###1.4 Sales price with sales condition
+
+```{r}
+data.eda %>% 
+  add_count(SalePrice, SaleCondition) %>% 
+      ggplot() + 
+      geom_point(aes(x = SaleCondition, y = SalePrice, size = n, colour = n)) +
+      scale_colour_gradient(name = "Number of Sales") +
+      scale_size(name = "Number of Sales") +
+      guides(colour = guide_legend(), size = guide_legend()) +
+      xlab("\nSales Condition") +
+      ylab("Sales Price\n") +
+      ggtitle("Summary of Sales") +
+      theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5)) +
+      theme(axis.text=element_text(size=10),
+      axis.title=element_text(size=12, face="bold"),
+      legend.text=element_text(size=8)) +
+      theme(legend.title.align=0.5)
+```
+
+###1.5 Plot of zone classification, with sales price and number
+
+```{r}
+#Changing zoning names
+data.eda$MSZoning <- as.factor(data.eda$MSZoning)
+levels(data.eda$MSZoning) <- c("Commercial","Floating Village Residential", 
+                               "Residential High Density", "Residential Low Density", 
+                               "Residential Medium Density")
+
+#Dot plot of zoning classification, MSSubClass (type of dwelling) with sales price and number
+
+data.eda %>% 
+  group_by(MSSubClass, MSZoning) %>% 
+    summarise(avg_price = mean(SalePrice), num = length(SalePrice)) %>% 
+      ggplot() + 
+      geom_point(aes(x = MSSubClass, y = MSZoning, colour = avg_price, size = num)) +
+      scale_colour_gradient(name = "Average price") +
+      scale_size(name = "Number of Sales") +
+      guides(colour = guide_legend(), size = guide_legend()) +
+      xlab("\nMSZoning") +
+      ylab("Zoning Classification\n") +
+      ggtitle("Summary of Sales") +
+      theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5)) +
+      theme(axis.text=element_text(size=10),
+      axis.title=element_text(size=12, face="bold"),
+      legend.text=element_text(size=8)) +
+      theme(legend.title.align=0.5)
+
+#Dot plot of zoning classification, BldgType (type of dwelling) with sales price and number
+data.eda %>% 
+  group_by(BldgType, MSZoning) %>% 
+    summarise(avg_price = mean(SalePrice), num = length(SalePrice)) %>% 
+      ggplot() + 
+      geom_point(aes(x = BldgType, y = MSZoning, colour = avg_price, size = num)) +
+      scale_colour_gradient(name = "Average price") +
+      scale_size(name = "Number of Sales") +
+      guides(colour = guide_legend(), size = guide_legend()) +
+      xlab("\nBldgType") +
+      ylab("Zoning Classification\n") +
+      ggtitle("Summary of Sales") +
+      theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5)) +
+      theme(axis.text=element_text(size=10),
+      axis.title=element_text(size=12, face="bold"),
+      legend.text=element_text(size=8)) +
+      theme(legend.title.align=0.5)
+
+#Dot plot of zoning classification, HouseStyle (style of dwelling) with sales price and number
+data.eda %>% 
+  group_by(HouseStyle, MSZoning) %>% 
+    summarise(avg_price = mean(SalePrice), num = length(SalePrice)) %>% 
+      ggplot() + 
+      geom_point(aes(x = HouseStyle, y = MSZoning, colour = avg_price, size = num)) +
+      scale_colour_gradient(name = "Average price") +
+      scale_size(name = "Number of Sales") +
+      guides(colour = guide_legend(), size = guide_legend()) +
+      xlab("\nHouseStyle") +
+      ylab("Zoning Classification\n") +
+      ggtitle("Summary of Sales") +
+      theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5)) +
+      theme(axis.text.x=element_text(size=10, angle = 60, hjust = 1),
+      axis.title=element_text(size=12, face="bold"),
+      legend.text=element_text(size=8)) +
+      theme(legend.title.align=0.5)
+```
+
+###1.6 Boxplot of sales price with overall condition of the house
+
+```{r}
+#Changing quality names
+data.eda$OverallQual <- as.factor(data.eda$OverallQual)
+levels(data.eda$OverallQual) <- c("Very Excellent", "Excellent", "Very Good", 
+                                  "Good", "Above Average", "Average", "Below Average", 
+                                  "Fair", "Poor", "Very Poor")
+
+#Changing condition names
+data.eda$OverallCond <- as.factor(data.eda$OverallCond)
+levels(data.eda$OverallCond) <- c("Very Excellent", "Excellent", "Very Good", 
+                                  "Good", "Above Average", "Average", 
+                                  "Below Average", "Fair", "Poor", "Very Poor")
+
+#Boxplot of sales price with overall condition of the house
+data.eda %>% group_by(OverallCond, SalePrice) %>% ggplot() +
+geom_boxplot(aes(x = OverallCond,
+y = SalePrice)) + coord_flip() +
+ylab("Sales Price\n") + xlab("\nOverall Condition") +
+ggtitle("Boxplot of Sale Price with Overall Condition") +
+theme(plot.title = element_text(size = 12,
+face = "bold", hjust = 0.5)) + theme(axis.text = element_text(size = 10),
+axis.title = element_text(size = 12,
+face = "bold"), legend.text = element_text(size = 8))
+```
+
+###1.7 Boxplot of sales price with overall quality of material and finish of house
+
+```{r}
+#Boxplot of sales price with overall quality of material and finish of house
+data.eda %>% group_by(OverallQual, SalePrice) %>% ggplot() +
+geom_boxplot(aes(x = OverallQual, y = SalePrice, group = 1)) + coord_flip() +
+ylab("Sales Price\n") + xlab("\nOverall Quality") +
+ggtitle("Boxplot of Sale Price with Overall Quality") +
+theme(plot.title = element_text(size = 12,
+face = "bold", hjust = 0.5)) + theme(axis.text = element_text(size = 10),
+axis.title = element_text(size = 12,
+face = "bold"), legend.text = element_text(size = 8))
+```
+
+###1.8 Dot plot of neighbourhood with sales price and number of sales
+```{r}
+#Dot plot of neighbourhood with sales price and number of sales
+data.eda %>% 
+  group_by(Neighborhood, SalePrice) %>%
+    count %>% 
+      ggplot() + 
+      geom_point(aes(x = Neighborhood, y = SalePrice, colour = n, size = n)) +
+      scale_colour_gradient(name = "Number of Sales") +
+      scale_size(name = "Number of Sales") +
+      guides(colour = guide_legend(), size = guide_legend()) +
+      xlab("\nNeighbourhood") +
+      ylab("Sales Price\n") +
+      coord_flip()+
+      ggtitle("Summary of Sales (Neighbourhood)") +
+      theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5)) +
+      theme(axis.text=element_text(size=10),
+      axis.title=element_text(size=12, face="bold"),
+      legend.text=element_text(size=8)) +
+      theme(legend.title.align=0.5)
+```
+
+###1.9 Dot plot of utilities available with sales price and number of sales
+```{r}
+#Dot plot of utilities available with sales price and number of sales
+data.eda %>% 
+  group_by(Utilities, SalePrice) %>%
+    count %>% 
+      ggplot() + 
+      geom_point(aes(x = Utilities, y = SalePrice, colour = n, size = n)) +
+      scale_colour_gradient(name = "Number of Sales") +
+      scale_size(name = "Number of Sales") +
+      guides(colour = guide_legend(), size = guide_legend()) +
+      xlab("\nUtilities available") +
+      ylab("Sales Price\n") +
+      coord_flip()+
+      ggtitle("Summary of Sales (Overall Utilities)") +
+      theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5)) +
+      theme(axis.text=element_text(size=10),
+      axis.title=element_text(size=12, face="bold"),
+      legend.text=element_text(size=8)) +
+      theme(legend.title.align=0.5)
+```
+
+###1.10 Dot plot of heating type and quality with sales price and number of sales
+```{r}
+#Changing heating quality names
+data.eda$HeatingQC <- as.factor(data.eda$HeatingQC)
+levels(data.eda$HeatingQC) <- c("Excellent", "Good", "Average", "Fair", "Poor")
+
+#Changing heating type names
+data.eda$Heating <- as.factor(data.eda$Heating)
+levels(data.eda$Heating) <- c("Floor Furnace", "Gas forced warm air furnace", 
+                              "Gas hot water or steam heat", "Gravity furnace	",
+                              "Hot water or steam heat other than gas", "Wall furnace")
+
+#Dot plot of heating type and quality with sales price and number of sales
+data.eda %>% 
+  group_by(Heating, HeatingQC) %>%
+    summarise(num = length(SalePrice), avg_price = mean(SalePrice)) %>% 
+      ggplot() + 
+      geom_point(aes(x = HeatingQC, y = avg_price, colour = Heating, size = num)) +
+      scale_colour_discrete(name = "Type of Heating") +
+      scale_size(name = "Number of Sales") +
+      xlab("\nHeating quality") +
+      ylab("Average Sales Price\n") +
+      coord_flip()+
+      ggtitle("Summary of Sales (Heating Type and Condition)") +
+      theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5)) +
+      theme(axis.text=element_text(size=10),
+      axis.title=element_text(size=12, face="bold"),
+      legend.text=element_text(size=8)) +
+      theme(legend.title.align=0.5)
+```
+
+###1.11 Dot plot of kitchens above grade and quality with sales price and number of sales
+```{r}
+#Dot plot of kitchens above grade and quality with sales price and number of sales
+data.eda$KitchenQual <- as.factor(data.eda$KitchenQual)
+levels(data.eda$KitchenQual) <- c("Excellent", "Good", "Average", "Fair", "Poor")
+
+data.eda %>% 
+  group_by(KitchenAbvGr, KitchenQual) %>%
+    summarise(num = length(SalePrice), avg_price = mean(SalePrice)) %>% 
+      ggplot() + 
+      geom_point(aes(x = KitchenQual, y = avg_price, colour = KitchenAbvGr, size = num)) +
+      scale_colour_continuous(name = "Grade of Kitchen") +
+      scale_size(name = "Number of Sales") +
+      xlab("\nKitchen quality") +
+      ylab("Average Sales Price\n") +
+      coord_flip()+
+      ggtitle("Summary of Sales (Kitchen Above Grade and Quality)") +
+      theme(plot.title = element_text(size = 12, face = "bold", hjust = 0.5)) +
+      theme(axis.text=element_text(size=10),
+      axis.title=element_text(size=12, face="bold"),
+      legend.text=element_text(size=8)) +
+      theme(legend.title.align=0.5)
+```
+
+###1.12 Relationship between BldgType and MSSubClass
+```{r, warning=FALSE}
+# BldgType and MSSubClass
+dat <- data.frame(table(data.eda$BldgType, data.eda$MSSubClass))
+names(dat) <- c("BldgType","MSSubClass","Count") 
+ggplot(data=dat, aes(x=BldgType, y=Count, fill=MSSubClass)) + 
+  geom_bar(stat="identity") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+```
+
+###1.13 Relationship between LotShape and LandContour
+```{r, warning=FALSE}
+# LotShape and LandContour
+dat <- data.frame(table(data.eda$LotShape, data.eda$LandContour))
+names(dat) <- c("LotShape","LandContour","Count") 
+ggplot(data=dat, aes(x=LotShape, y=Count, fill=LandContour)) + 
+  geom_bar(stat="identity") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+```
+
+###1.14 Relationship between BldgType and HouseStyle
+```{r, warning=FALSE}
+# BldgType and HouseStyle
+dat <- data.frame(table(data.eda$BldgType, data.eda$HouseStyle))
+names(dat) <- c("BldgType","HouseStyle","Count") 
+ggplot(data=dat, aes(x=BldgType, y=Count, fill=HouseStyle)) + 
+  geom_bar(stat="identity") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+```
+
+###1.15 Relationship between MSSubClass and HouseStyle
+```{r 2.6, warning=FALSE}
+# MSSubClass and HouseStyle
+dat <- data.frame(table(data.eda$MSSubClass, data.eda$HouseStyle))
+names(dat) <- c("MSSubClass","HouseStyle","Count") 
+ggplot(data=dat, aes(x=MSSubClass, y=Count, fill=HouseStyle)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+```
+
+###1.16 Relationship between RoofStyle and RoofMaterial
+```{r, warning=FALSE}
+# RoofStyle and RoofMatl
+dat <- data.frame(table(data.eda$RoofStyle, data.eda$RoofMatl))
+names(dat) <- c("RoofStyle","RoofMatl","Count") 
+ggplot(data=dat, aes(x=RoofStyle, y=Count, fill=RoofMatl)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+```
+
+Looks like CompShg dominates the RoofMaterial area.  
+
+###1.17 Relationship between BsmtFinType2 and BsmtCond
+```{r, warning=FALSE}
+# BsmtFinType2 and BsmtCond
+dat <- data.frame(table(data.eda$BsmtFinType2, data.eda$BsmtCond))
+names(dat) <- c("BsmtFinType2","BsmtCond","Count") 
+ggplot(data=dat, aes(x=BsmtFinType2, y=Count, fill=BsmtCond)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+
+# BsmtFinType2 and BsmtCond
+
+ggplot(data=dat, aes(x=BsmtCond, y=Count, fill=BsmtFinType2)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+```
+
+BsmtCond dominated by TA(typical/average)  
+BsmtFinType2 dominated by Unf (Uniform)  
+
+###1.18 Relationship between Heating and CentralAir
+```{r 2.15, tidy=TRUE, tidy.opts=list(width.cutoff=60), comment=NA, warning=FALSE}
+# Heating and CentralAir
+dat <- data.frame(table(data.eda$Heating, data.zillow$CentralAir))
+names(dat) <- c("Heating","CentralAir","Count") 
+ggplot(data=dat, aes(x=Heating, y=Count, fill=CentralAir)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+
+ggplot(data=dat, aes(x=CentralAir, y=Count, fill=Heating)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+```
+
+There seems to be some kind of relationship. However, having central airconditioning would tend to increase the SalePrice. We can take a look.  
+
+###1.19 Relationship between Electrical and CentralAir
+
+```{r, warning=FALSE}
+# Electrical and CentralAir
+dat <- data.frame(table(data.eda$Electrical, data.eda$CentralAir))
+names(dat) <- c("Electrical","CentralAir","Count") 
+ggplot(data=dat, aes(x=Electrical, y=Count, fill=CentralAir)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+
+ggplot(data=dat, aes(x=CentralAir, y=Count, fill=Electrical)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+```
+Seems like there is a relationship!   
+
+###1.20 Checking the correlation between areas of floors
+```{r 2.17, tidy=TRUE, tidy.opts=list(width.cutoff=60), comment=NA}
+# Square Feets for floors
+print(paste0("Correlation between First Floor square feet and Second Floor square feet : ", cor(data.eda$X1stFlrSF, data.eda$X2ndFlrSF)))
+print(paste0("Correlation between First Floor square feet and Low quality finished square feet (all floors) : ",cor(data.eda$X1stFlrSF, data.eda$LowQualFinSF)))
+print(paste0("Correlation between Second Floor square feet and Low quality finished square feet (all floors) : ", cor(data.eda$X2ndFlrSF, data.eda$LowQualFinSF)))
+print(paste0("Correlation between First Floor square feet + Second Floor Square Feet and Above grade (ground) living area square feet :",cor(data.eda$X1stFlrSF+data.eda$X2ndFlrSF, data.eda$GrLivArea)))
+
+```
+
+Wow! 0.99 correlation. Can remove First Floor square feet + Second Floor Square Feet and keep only Above grade (ground) living area square feet.  
+
+###1.21 Checking the correlation between bedroom, bathroom, kitchen and total areas
+```{r}
+# Bedroom and Bathroom
+print(paste0("Basement full bathrooms and Bedrooms above grade : ", cor(data.eda$BsmtFullBath, data.eda$BedroomAbvGr)))
+print(paste0("Basement half bathrooms and Bedrooms above grade : ", cor(data.eda$HalfBath, data.eda$BedroomAbvGr)))
+print(paste0("Basement half + full bathrooms and Bedrooms above grade : ", cor(data.eda$HalfBath + data.eda$BsmtFullBath, data.eda$BedroomAbvGr)))
+print(paste0("Total rooms above grade and Bedrooms above grade : ", cor(data.eda$TotRmsAbvGrd, data.eda$BedroomAbvGr)))
+print(paste0("Total rooms above grade and Bedrooms +Kitchen above grade : ", cor(data.eda$TotRmsAbvGrd,data.eda$BedroomAbvGr + data.eda$KitchenAbvGr)))
+```
+Good correlation between total rooms above grade and Bedrooms + Kitchen above grade   
+
+###1.22 Relationship between when the garage was built and the finishing type
+```{r 2.22, tidy=TRUE, tidy.opts=list(width.cutoff=60), comment=NA, warning=FALSE}
+# GarageYrBlt and GarageFinish
+dat <- data.frame(table(data.eda$GarageFinish, data.eda$GarageYrBlt))
+names(dat) <- c("GarageFinish","GarageYrBlt","Count") 
+ggplot(data=dat, aes(x=GarageFinish, y=Count, fill=GarageYrBlt)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+
+
+
+ggplot(data=dat, aes(x=GarageYrBlt, y=Count, fill=GarageFinish)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  scale_x_discrete(breaks=c(1900,2010, by =10)) +
+  theme(axis.text.x=element_text(angle=90, hjust=1)) +
+  theme(legend.justification=c(2,0), legend.position=c(1,0))
+```
+
+Newer garages having finished interiors vs the old ones that have unfinished  
+
+###1.23 Relationship between when the garage was built and the driveway paving
+```{r 2.23, tidy=TRUE, tidy.opts=list(width.cutoff=60), comment=NA}
+# GarageYrBlt and PavedDrive
+dat <- data.frame(table(data.eda$PavedDrive, data.eda$GarageYrBlt))
+names(dat) <- c("PavedDrive","GarageYrBlt","Count") 
+ggplot(data=dat, aes(x=PavedDrive, y=Count, fill=GarageYrBlt)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+
+ggplot(data=dat, aes(x=GarageYrBlt, y=Count, fill=PavedDrive)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  scale_x_discrete(breaks=c(1900,2010, by =10)) +
+  theme(axis.text.x=element_text(angle=90, hjust=1)) +
+  theme(legend.justification=c(2,0), legend.position=c(1,0))
+```
+
+Newer garages having paved driveway vs the old ones.  
+
+###1.24 Relation between Year built and sale type
+```{r}
+# Year Built and Sale Type
+dat <- data.frame(table(data.eda$YearBuilt, data.eda$SaleType))
+names(dat) <- c("YearBuilt","SaleType","Count") 
+ggplot(data=dat, aes(x=YearBuilt, y=Count, fill=SaleType)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  scale_x_discrete(breaks=c(1900,2010, by =10)) +
+  theme(axis.text.x=element_text(angle=90, hjust=1)) +
+  theme(legend.justification=c(2,0), legend.position=c(1,0))
+```
+
+###1.25 Relation between Year sold and sale type
+
+```{r}
+# Year Sold and Sale Type
+dat <- data.frame(table(data.zillow$YrSold, data.zillow$SaleType))
+names(dat) <- c("YrSold","SaleType","Count") 
+ggplot(data=dat, aes(x=YrSold, y=Count, fill=SaleType)) + 
+  geom_bar(stat="identity", position = "fill") + 
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+
+```
+
+##Part 2 :  Data cleaning and transformations
+
+
+
+###2.1 Treatment of outliers  
+
+####2.1.1 Remove outlier from response and divide into train and test for imputation
+```{r}
+# check how y looks
+hist(data.zillow$SalePrice, xlab = "SalePrice")
+data.zillow <- data.zillow[data.zillow$SalePrice <= quantile(data.zillow$SalePrice, 0.95),]
+
+# divide to test and train
+set.seed(100)
+data.zillow <- data.zillow[sample(nrow(data.zillow)), ]
+train.data <- data.zillow[1:1168,]
+test.data <- data.zillow[1169:nrow(data.zillow),]
+
+```
+
+####2.1.2 Remove outliers in predictors  
+We need to treat all the outliers by squishing the data into a range, such that all data points lie between 5% and 95% of the data.
+```{r}
+data.zillow$LotFrontage <- squish(data.zillow$LotFrontage, 
+                                  quantile(data.zillow$LotFrontage, c(.05, .95), na.rm=TRUE))
+data.zillow$LotArea <- squish(data.zillow$LotArea, 
+                              quantile(data.zillow$LotArea, c(.05, .95), na.rm=TRUE))
+data.zillow$MasVnrArea <- squish(data.zillow$MasVnrArea, 
+                                 quantile(data.zillow$MasVnrArea, c(.05, .95), na.rm=TRUE))
+data.zillow$BsmtFinSF1 <- squish(data.zillow$BsmtFinSF1, 
+                                 quantile(data.zillow$BsmtFinSF1, c(.05, .95), na.rm=TRUE))
+data.zillow$BsmtFinSF2 <- squish(data.zillow$BsmtFinSF2, 
+                                 quantile(data.zillow$BsmtFinSF2, c(.05, .95), na.rm=TRUE))
+data.zillow$TotalBsmtSF <- squish(data.zillow$TotalBsmtSF, 
+                                  quantile(data.zillow$TotalBsmtSF, c(.05, .95), na.rm=TRUE))
+data.zillow$X1stFlrSF <- squish(data.zillow$X1stFlrSF, 
+                                quantile(data.zillow$X1stFlrSF, c(.05, .95), na.rm=TRUE))
+data.zillow$X2ndFlrSF <- squish(data.zillow$X2ndFlrSF, 
+                                quantile(data.zillow$X2ndFlrSF, c(.05, .95), na.rm=TRUE))
+data.zillow$LowQualFinSF <- squish(data.zillow$LowQualFinSF, 
+                                   quantile(data.zillow$LowQualFinSF, c(.05, .95), na.rm=TRUE))
+data.zillow$GrLivArea <- squish(data.zillow$GrLivArea, 
+                                quantile(data.zillow$GrLivArea, c(.05, .95), na.rm=TRUE))
+data.zillow$GarageArea <- squish(data.zillow$GarageArea, 
+                                 quantile(data.zillow$GarageArea, c(.05, .95), na.rm=TRUE))
+data.zillow$WoodDeckSF <- squish(data.zillow$WoodDeckSF, 
+                                 quantile(data.zillow$WoodDeckSF, c(.05, .95), na.rm=TRUE))
+data.zillow$OpenPorchSF <- squish(data.zillow$OpenPorchSF, 
+                                  quantile(data.zillow$OpenPorchSF, c(.05, .95), na.rm=TRUE))
+data.zillow$BsmtFinSF1 <- squish(data.zillow$BsmtFinSF1, 
+                                 quantile(data.zillow$BsmtFinSF1, c(.05, .95), na.rm=TRUE))
+data.zillow$EnclosedPorch <- squish(data.zillow$EnclosedPorch, 
+                                    quantile(data.zillow$EnclosedPorch, c(.05, .95), na.rm=TRUE))
+data.zillow$X3SsnPorch <- squish(data.zillow$X3SsnPorch, 
+                                 quantile(data.zillow$X3SsnPorch, c(.05, .95), na.rm=TRUE))
+data.zillow$PoolArea <- squish(data.zillow$PoolArea, 
+                               quantile(data.zillow$PoolArea, c(.05, .95), na.rm=TRUE))
+data.zillow$MiscVal <- squish(data.zillow$MiscVal, 
+                              quantile(data.zillow$MiscVal, c(.05, .95), na.rm=TRUE))
+```
+
+
+###2.2 Data imputation and transformation  
+
+####2.2.1 Transformations on SalePrice (the response variable)  
+
+For linear regression, we are making the assumption that the variables are normally distributed. We need to check for this assumption. If there are any outliers (example skewness), we need to get that fixed before we proceed.
+```{r}
+data.zillow %>% 
+  ggplot() +
+  geom_histogram(aes(x = SalePrice), fill = 'blue')
+data.zillow %>% 
+  ggplot() +
+  geom_histogram(aes(x = log(SalePrice)), fill = '#D55E00')
+```
+
+
+From the boxcox plot, we see that we need to perform transformation, in order to make our model linear.  
+The optimal lambda value we obtain is 0.3434343. So we apply the transformation of response_var to the power of lambda
+```{r}
+# From boxcox(), we get the optimum lambda value = 0.3434343
+data.zillow$SalePrice <- data.zillow$SalePrice ^ 0.3434343
+```
+
+####2.2.2 Divide data into test and training set, this will be used in imputations later.
+```{r}
+# divide to test and train
+set.seed(100)
+data.zillow <- data.zillow[sample(nrow(data.zillow)), ]
+train.data <- data.zillow[1:1168,]
+test.data <- data.zillow[1169:nrow(data.zillow),]
+SalePrice <- data.zillow$SalePrice
+data.zillow <- dplyr::select(data.zillow, c(-Id,-SalePrice)) 
+```
+
+####2.2.3 Creating a variable called Age, which calculates the age of the building  
+Also, bucketing the age into bins to identify the age category of houses.
+```{r}
+#Create 'Age' variable
+data.zillow$Age <- data.zillow$YrSold - data.zillow$YearBuilt
+# Since age varies from 0 to 140 years, we need to bucket them: 
+# <10, 10 - 40, 40 - 70, 70- 100 ,>100
+Bins <- c("< 10", "10 - 40", "40 - 70", "70 - 100", "> 100")
+data.zillow$Age_bins <- is.character(cut(data.zillow$Age, breaks = 
+                                           c (-10, 10, 40, 70, 100, 500), labels = Bins))
+```
+
+####2.2.4 Transforming numerical variables  
+
+There is a possibility that other features might be skewed as well. So let us try to identify the skewness and do a log transformation for them as well.
+```{r}
+# get the data type of all variables, will be used later
+features.class <- sapply(names(data.zillow),function(x){class(data.zillow[[x]])})
+# get all features that are integers (which have the tendency to be skewed)
+numeric.features <-names(features.class[features.class != "character"])
+# determine skew for each integer feature
+skewed_feats <- sapply(numeric.features,function(x){skewness(data.zillow[[x]],na.rm=TRUE)})
+# keep only features that exceed a threshold for skewness
+skewed_feats <- skewed_feats[skewed_feats > 0.75 & !is.nan(skewed_feats)]
+# transform excessively skewed features with log(x + 1)
+for(x in names(skewed_feats)) {
+  data.zillow[[x]] <- log(data.zillow[[x]] + 1)
+}
+```
+
+Now, Imputation time!  
+
+####2.2.5 Fix missing catagorical data for column Electrical
+```{r}
+cols.electrical <- c("Neighborhood", "BldgType", "HouseStyle", "OverallQual", "OverallCond", 
+                     "YearBuilt", "YearRemodAdd", "Electrical")
+train.electrical <- data.zillow[!is.na(data.zillow$Electrical), cols.electrical]
+test.electrical <- data.zillow[is.na(data.zillow$Electrical), cols.electrical]
+rpart.electrical <- rpart(as.factor(Electrical) ~ .,
+                    data = train.electrical,
+                    method = "class",
+                    na.action=na.omit)
+data.zillow$Electrical[is.na(data.zillow$Electrical)] <- 
+  as.character(predict(rpart.electrical, test.electrical, type = "class"))
+```
+
+####2.2.6 Fix LotFronage
+```{r}
+cols.lotfrontage <- c("MSSubClass", "MSZoning",  "Street", "Alley", "LandContour", "LotConfig", 
+                      "BldgType", "LotFrontage")
+train.lotfrontage <- data.zillow[!is.na(data.zillow$LotFrontage), cols.lotfrontage]
+test.lotfrontage <- data.zillow[is.na(data.zillow$LotFrontage), cols.lotfrontage]
+rpart.lotfrontage <- rpart(LotFrontage ~ .,
+                   data = train.lotfrontage,
+                   method = "class")
+data.zillow$LotFrontage[is.na(data.zillow$LotFrontage)] <- 
+  predict(rpart.lotfrontage, test.lotfrontage, type="class")
+```
+
+####2.2.7 Using mice package to impute the rest of the variables. We use the cart (Classification and Regression Trees) to predict the missing values.
+```{r}
+# impute values of MasVnrType and MasVnrArea using the cart function.
+k <- mice(data.zillow, m=5, maxit=5, method='cart', seed=500)
+data.zillow <- complete(k,1)
+```
+
+####2.2.8 Transform catagorical variables into numerical by treating each catagory as a new variable.
+```{r}
+# get all character variables
+cat.feats <- names(features.class[features.class == "character"])
+# transform the catagorical values to numerical 0s and 1s
+dummies <- dummyVars( ~ ., data.zillow[cat.feats])
+categorical_1_hot <- predict(dummies,data.zillow[cat.feats])
+categorical_1_hot[is.na(categorical_1_hot)] <- 0  #for any level that was NA, set to zero
+```
+
+####2.2.9 Changing any missing integer value to mean
+```{r, warning=F, error=F}
+numeric.df <- data.zillow[numeric.features]
+for (x in numeric.features) {
+    mean_value <- mean(train.data[[x]], na.rm = TRUE)
+    data.zillow[[x]][is.na(data.zillow[[x]])] <- mean_value
+}
+```
+
+####2.2.10 Making data.zillow as a mix of imputed integer and catagorical values  
+```{r}
+data.zillow <- cbind(data.zillow[numeric.features],categorical_1_hot)
+```
+
+###2.3 Test and training set creation  
+
+This will be used to train the ridge, lasso and elastic net models.
+```{r}
+# create data for training and test
+X_train <- data.zillow[1:nrow(train.data),]
+X_test <- data.zillow[(nrow(train.data)+1):nrow(data.zillow),]
+y_train <- train.data$SalePrice
+y_test <- test.data$SalePrice
+```
+
+##Part 3 : Explanatory Modeling  
+
+###3.1 Variable selection  
+
+
+Now that we have the clean data, we see that the data has a total 288 variables.
+It is essential for an explanatory model to select variables over which we can run our least square regression model.
+For the variable selection, we are looking at the following steps.  
+***(a)*** Perform Lasso regression on the training data to select an optimal value for lambda, which gives us the least MSPE.  
+***(b)*** Using this lambda, we run Lasso on the full zillow dataset, to find the optimal variables for our model.  
+***(c)*** From the variales that we get in lasso, we run the ols model on the full zillow dataset, and look at the statistically significant values. In order to do this, we remove the variables that have P-value > 0.05 and then sort the variables in decending order by the absolute values of their co-efficients.  
+***(d)*** Upon getting the significant variables, we process these variables using a forward subset selection process, where we select a total of 30 variables.  
+***(f)*** These are the top 30 variables that we use for our explanatory modeling.  
+
+Going through the process step by step  
+**Step(a) Lasso on the training set, ploting the model and the cross validation model**  
+
+Since we have a total of 288 predictors, including dummy variables for the categorical variables, we opted to run a Lasso regression to identify those which have greater explanatory power and shrink the coefficients of other variables to zero. Firstly, we splited our original dataset in 80:20 ratio for training and testing respectively. The optimal tuning parameter for the Lasso regression was then selected using cross-validation that is executed by the function `cv.glmnet`.
+
+```{r}
+#Lasso model
+#Creating grid
+grid.lambda <- 10^seq(10, -2, length = 100)
+lasso.model <- glmnet(as.matrix(X_train), y_train, alpha = 1, lambda = grid.lambda)
+plot(lasso.model)
+#Finding the best lambda
+lasso.cv <- cv.glmnet(as.matrix(X_train), y_train, alpha = 1)
+best_lambda <- lasso.cv$lambda.min
+lasso.pred <- predict(lasso.model, s = best_lambda, newx = as.matrix(X_test))
+mspe.lasso <- mean((lasso.pred - y_test)^2)
+plot(lasso.cv)
+```
+
+**Step(b) Run the Lasso on the full model, for the best lambda selected**  
+```{r}
+#Fitting on the entire data
+y <- SalePrice 
+final.model <- glmnet(as.matrix(data.zillow), y, alpha = 1, lambda = best_lambda)
+Coef.Lasso <- coef(final.model)
+variables <- rownames(Coef.Lasso)[which(abs(Coef.Lasso) > 10e-500)][-1]
+print ("Variables selected using lasso")
+print (variables)
+```
+
+we are left with only 96 variables out of 288 variables. But for explanatory purpose we wanted to reduce the number of variables, which would make the model simpler having better explanatory power. Hence, on these 96 variables we performed OLS to generate most significant variables. Here, our approach was to select all those variables which were significant at 5% level of significance.
+
+**Step(c) Run OLS on the selected variables to see which variables are statistically significant**
+```{r}
+#Fitting OLS
+data.zillow.ols <- data.zillow[,variables]
+y.ols <- y
+myMod <- lm(y.ols ~ as.matrix(data.zillow.ols))
+# summary(myMod)
+
+#Number of statistically significant coefficients
+# length(which(summary(myMod)$coefficients[,4] < 0.05))
+
+#Getting names of statistically significant variables
+names_vals <- summary(myMod)$coefficients[,1][-1]
+names_vals <- names_vals[(which(summary(myMod)$coefficients[,4] < 0.05))]
+
+# For checking positive or negative - sort(names_vals, decreasing = T)
+#Ordering in terms of coefficients (largest to smallest) and getting names 
+myLs <- strsplit(names(sort(abs(names_vals), decreasing = T)), ')')
+varnames <- unlist(lapply(1:length(myLs), function(x) myLs[[x]][2]))
+print ("Variables in the decreasing order of their statistical significance")
+print (varnames)
+
+imp_var_names <- varnames
+```
+
+
+
+**Step(d) From the variables that we selected above, we now run the forward subset selection, to get our top 30 desired variables**
+```{r}
+imp_var_names[5] <- "MSZoningC (all)"
+data.zillow.lasso <- data.zillow.ols[,imp_var_names]
+regsubsets.out <-
+  regsubsets(SalePrice ~ .,
+             data.zillow.lasso,
+             nbest = 1,       # 1 best model for each number of predictors
+             nvmax = NULL,    # NULL for no limit on number of variables
+             force.in = NULL, force.out = NULL,
+             method = "forward")
+summary.out <- summary(regsubsets.out)
+numPred <- 30
+best.subset.colnum <- which(as.data.frame(summary.out$outmat)[numPred,] == '*')
+data.zillow.lasso.best.subset <- data.zillow.lasso[best.subset.colnum]
+print("Top 30 variables from forward selection method :")
+print(names(data.zillow.lasso.best.subset))
+```
+Finally, we modelled these top 30 variables using OLS that returns a set of unbiased coefficients of estimation.  
+
+
+###3.2 Running the least square regression model on the selected 30 variables  
+Also perform the cross validation using *cv.lm(data.zillow.lasso.best.subset, fit.zillow, m=5)*
+```{r results='asis', echo=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(results = "hide")
+fit.zillow <- lm(SalePrice ~ ., data = data.zillow.lasso.best.subset)
+fit.zillow.sum <- summary(fit.zillow) #0.8783 , 0.8873
+#cross validation
+cv <- cv.lm(data.zillow.lasso.best.subset, fit.zillow, m=5)
+```
+
+```{r}
+print (paste0("MSE of the ols model : ", mean(fit.zillow$residuals^2))) #MSE
+print (paste0("Adjusted R^2 of the ols model : ", fit.zillow.sum$adj.r.squared))
+print (paste0("MSPE of the ols model (using 5 fold cross validation): ", attr(cv, 'ms')))
+```
+
+
+We obtain a good R^2 using the cross validation test.   
+Next step, is to check for model assumptions to see if they are met or not.  
+
+
+###3.3 Checking model assumptions
+
+Using the least square model, we check if the assumptions that we made are satisfied or not.
+The assumptions that we need to look for are :
+(a) Our model is linearly distributed around the true response values.
+(b) Error terms are statistically independent
+(c) Error terms have constant variance
+(d) Error terms are not correlated to each other.
+(e) Mean of the error terms is 0.
+
+
+####3.3.1 Linearity and additivity of the relationship between dependent and independent variables:  
+
+#####3.3.1.1 Plot of observed versus predicted values  
+```{r}
+plot(SalePrice ~ fit.zillow$fitted.values, xlab="Fitted Values", ylab="Observed Values")
+abline(0, 1)
+```
+The points is symmetrically distributed around a diagonal line, with a roughly constant variance.  
+
+#####3.3.1.2 Plot of residuals versus predicted values
+```{r}
+plot(fit.zillow$residuals ~ fit.zillow$fitted.values)
+abline(h = 0)
+```
+
+The points is symmetrically distributed around a horizontal line, with a roughly constant variance. This suggests homoscedasticity of the residuals, which can be interpreted as homoscedasticity of the error terms.
+
+
+####3.3.2 Statistical independence of the errors
+
+#####3.3.2.1 plot the residual  
+Since we are unaware of the error term, we look at the residual term instead.
+Let us plot the residual to check how it looks.
+```{r}
+plot(fit.zillow$residuals)
+```
+
+#####3.3.2.2 correlation between the residuals  
+Now, I try to find the correlation between the residuals.  
+We use the auto-correlation function. If the residuals were not autocorrelated, the correlation (Y-axis) from the immediate next line onwards will drop to a near zero value below the dashed blue line (significance level).
+```{r}
+acf(fit.zillow$residuals)
+```
+The blue lines in the plot is our critical value line. We see that all autocorrelations are below our critical lines (except for the first one, which is the correlation of a variable with itself).  
+Since the acf drops below the significance level, we can say that the resdiuals are not auto-correlated.
+
+#####3.3.2.3 Durbin-Watson statistic  
+
+In order to test the autocorrelation more formally, we look at the Durbin-Watson test. 
+The Durbin-Watson statistic is always between 0 and 4. A value of 2 means that there is no autocorrelation in the sample. Values approaching 0 indicate positive autocorrelation and values toward 4 indicate negative autocorrelation.
+```{r}
+dwtest(SalePrice ~ ., data = data.zillow.lasso.best.subset) 
+```
+The DW value of 2 suggests that there is no correlation between the residuals, which can be interpreted as no correlation between the error terms in the model. Thus our assumption is met.
+
+
+####3.3.3 Test for constant variance of the error term. (Homoscedasticity)  
+```{r}
+plot(fit.zillow$residuals ~ fit.zillow$fitted.values)
+abline(h = 0)
+```
+We can see that that residuals are well distributed around the fitted values with constant variance. We do not see any major outliers in the plot that could account for heteroscedasticity. Hence, we can say that the residuals and therefore the error terms are homoscedasticity in nature. Our assumptions are met.  
+
+####3.3.4  Normality of the error distribution  
+
+#####3.3.4.1. Ploting the residuals  
+
+```{r}
+hist(fit.zillow$residuals)
+```
+
+The residuals are approximately normally distributed around the mean of 0. This accounts for normal distribution of the error terms. Hence, our assumption is met.  
+
+#####3.3.4.2. Q-Q plot of residuals
+```{r}
+qqnorm(fit.zillow$residuals)
+qqline(fit.zillow$residuals)
+```
+
+A normal distribution here is indicated by the points lying close to the diagonal reference line, for the most part.
+Some deviations from the line suggests that we have skewness in the plot.  
+We tried several transformations with log(response variable), log(log(response variable)), log(response variable)^lambda (lambda from box-cox), log(response variable + 1)^lambda/lambda, but this was the closest to linearity that we could get with the data and the predictors we choose.   
+
+
+#####3.3.4.3 Kolmogorov-Smirnov test
+```{r}
+ks.test(fit.zillow$residuals, pnorm)
+```
+
+#####3.3.4.4 Shapiro Wilk's W test
+```{r}
+shapiro.test(fit.zillow$residuals)
+```
+
+We see that the p-value is rather low for both the Kolmogorov-Smirnov test and the Shapiro-Wilk normality test. Our hypothesis is not met and we fail the "statistical normality test".  
+However, when we look at the histogram of the residuals and the Q-Q plot, we can see that the residuals and the error terms are approximately normally distributed. Failing the KS test and the Shapiro test could be attributed to the fact that we are dealing with the real world data, which is not always in a normal form.  
+But since our plots suggests sufficient normality, we can assume error terms to be normal for our data.  
+
+Hence, our model meets all assumptions of linearity.  
+
+Next we look at the values to see if we have any unusual observations.  
+
+####3.3.5 Finding unusual observations  
+
+#####3.3.5.1 Points of leverage
+```{r}
+inf <- influence(fit.zillow)
+# half-normal plot
+library(faraway)
+halfnorm(influence(fit.zillow)$hat)
+```
+There are no particular points of high leverage that influences the fit.  
+Also, all continuous variables have already been treated for outliers at the start of the analysis.  
+
+####3.3.6 Variance Stabilization  
+```{r}
+bc <- boxcox(SalePrice ~ ., data = data.zillow.lasso.best.subset)
+lambda <- bc$x[which.max(bc$y)]  #0.3434343 #0.3838384 (without log on y)
+```
+The new box-cox plot suggests that the model is variance stabilized.  
+
+
+####3.3.7 Checking for Multicolinearity  
+```{r}
+VIF <- function(linear.model, no.intercept=FALSE, all.diagnostics=FALSE, plot=FALSE) {
+    require(mctest)
+    if(no.intercept==FALSE) design.matrix <- model.matrix(linear.model)[,-1]
+    if(no.intercept==TRUE) design.matrix <- model.matrix(linear.model)
+    if(plot==TRUE) mc.plot(design.matrix,linear.model$model[1])
+    if(all.diagnostics==FALSE) output <- 
+        imcdiag(design.matrix,linear.model$model[1], method='VIF')$idiags[,1]
+    if(all.diagnostics==TRUE) output <- imcdiag(design.matrix,linear.model$model[1])
+    output
+ }
+
+VIF(fit.zillow, all.diagnostics = T)
+```
+The VIF diagnostics tell us that we do not have any multicolinearity between the variables that we have selected in our model.  
+
+
+
+##Part 4 : Predicting values for Morty's house  
+
+Lets try to predict the price of Morty's house. For this, we need to clean and normalize his data first.  
+
+###4.1 Loading Data  
+
+So Morty comes in with his house data. Lets try to predict the price of his house.  
+For this, we need to clean and normalize his data first.
+```{r}
+file_morty <- "/Users/Asmita/Documents/USF/Fall_Mod_1/MSAN601/Regression-Analysis/Case\ Study/morty.txt"
+data.morty <- read.table(file_morty, sep = ",", header = T, stringsAsFactors = F)
+file_zillow <- "/Users/Asmita/Documents/USF/Fall_Mod_1/MSAN601/Regression-Analysis/Case\ Study/housing.txt"
+zillow.reload <- read.table(file_zillow, sep = ",", header = T, stringsAsFactors = F)
+mean(zillow.reload$WoodDeckSF)
+data.morty$WoodDeckSF
+data.morty['Id'] <- 'Morty'
+data.combine <- rbind(zillow.reload, data.morty[,-1])
+morty.SalePrice = data.morty$SalePrice
+data.combine <- dplyr::select(data.combine, -c(SalePrice))
+```
+```{r}
+#Transforming morty data:
+# Create Age_bin variable
+data.combine$Age <- data.combine$YrSold - data.combine$YearBuilt
+data.combine$Age_bins[data.combine$Age < 10] <- "< 10"
+data.combine$Age_bins[data.combine$Age >= 10 & data.combine$Age <40 ] <- "10 - 40"
+data.combine$Age_bins[data.combine$Age >= 40 & data.combine$Age <70 ] <- "40 - 70"
+data.combine$Age_bins[data.combine$Age >= 70 & data.combine$Age <100 ] <- "70 - 100"
+data.combine$Age_bins[data.combine$Age >= 100 ] <- "> 100"
+# Skewness: Taking log of the skewed variables treated in training data
+for(x in names(skewed_feats)) {
+  data.combine[[x]] <- log(data.combine[[x]] + 1)
+}
+```
+
+###4.2 Creating variables
+```{r}
+# get all character variables
+cat.feats <- names(features.class[features.class == "character"])
+# Transform the catagorical values to numerical 0s and 1s
+dummies <- dummyVars( ~ ., data.combine[cat.feats])
+categorical_1_hot <- predict(dummies,data.combine[cat.feats])
+categorical_1_hot[is.na(categorical_1_hot)] <- 0  #for any level that was NA, set to zero
+data.combine.new <- cbind(data.combine,categorical_1_hot)
+data.morty.new <- data.combine.new[data.combine.new$Id == 'Morty',]
+# Changing variables to improve Morty's price
+
+# The average wood deck for houses is 94. But Morty's is only 40. 
+```
+
+###4.3 Predicting Morty's house price
+```{r}
+# Prediction on Morty data
+eda_model_data <- data.morty.new[,names(data.zillow.lasso.best.subset)]
+y_pred <- predict(fit.zillow, eda_model_data, interval="confidence") #12.12443
+#summary(fit.zillow)
+y_pred <- y_pred^(1/0.3434343)
+
+
+```
+
+
+We run the linear regression model with the variables we deem fit and find the 95% confidence interval for the model. Looking at the values, we can say that we are 95% confident that if Morty sells his house now, as is, he would receieve a maximum of 160954 USD. On an average, he can sell his house for 155415 USD.  
+
+###4.4 Suggesting top 3 changes that Morty can do to improve the sale price of his house  
+
+From the variables that we selected above, Morty can make changes to the following  
+*1.* Kitchen Quality : Morty can improve his kitchen quality from Typical to Excellent, which will impact his house's sale price positively.  
+*2.* Fireplaces : If Morty can add fireplaces to his property, the house price is likely to go up.  
+*3.* Basement Quality : Morty can improve his basement quality from Typical to Excellent, which will impact his house's sale price positively.   
+
+We suggest this, as these are the top variables (in terms of significance level) that can be dealt with.  
+
+We will change the above mentioned variables to see how improving some conditions increases the selling price.
+```{r}
+# Changing variables to improve Morty's price
+data.morty.new['KitchenQualEx'] <- 1
+data.morty.new['Fireplaces'] <- 1
+data.morty.new['BsmtQualEx'] <- 1
+data.morty.new['KitchenQualTA'] <- 0
+data.morty.new['BsmtQualTA'] <- 0
+
+eda_model_data.new <- data.morty.new[,names(data.zillow.lasso.best.subset)]
+y_pred.new <- predict(fit.zillow, eda_model_data.new, interval="confidence") #12.12443
+
+y_pred.new <- y_pred.new^(1/0.3434343)
+
+```
+If Morty changes all three variables, he can sell his house for a maximum price of 191359 USD and an average price of 182311 USD.  
+
+```{r}
+# Changing variables to improve Morty's price
+data.morty.new['KitchenQualEx'] <- 1
+data.morty.new['Fireplaces'] <- 0
+data.morty.new['BsmtQualEx'] <- 0
+data.morty.new['KitchenQualTA'] <- 0
+data.morty.new['BsmtQualTA'] <- 1
+
+eda_model_data.new <- data.morty.new[,names(data.zillow.lasso.best.subset)]
+y_pred.new <- predict(fit.zillow, eda_model_data.new, interval="confidence") #12.12443
+#summary(fit.zillow)
+y_pred.new <- y_pred.new^(1/0.3434343)
+```
+
+If Morty just changes the Kitchen Quality to make it excellent, he can sell his house for a maximum of 170960 USD and an average of 162860 USD.  
+
+```{r}
+# Changing variables to improve Morty's price
+data.morty.new['KitchenQualEx'] <- 0
+data.morty.new['Fireplaces'] <- 1
+data.morty.new['BsmtQualEx'] <- 0
+data.morty.new['KitchenQualTA'] <- 1
+data.morty.new['BsmtQualTA'] <- 1
+
+eda_model_data.new <- data.morty.new[,names(data.zillow.lasso.best.subset)]
+y_pred.new <- predict(fit.zillow, eda_model_data.new, interval="confidence") #12.12443
+#summary(fit.zillow)
+y_pred.new <- y_pred.new^(1/0.3434343)
+```
+
+If Morty just adds a fireplace to his property, he can sell his house for a maximum of 162095 USD and an average of 156315 USD.  
+
+```{r}
+# Changing variables to improve Morty's price
+data.morty.new['KitchenQualEx'] <- 0
+data.morty.new['Fireplaces'] <- 0
+data.morty.new['BsmtQualEx'] <- 1
+data.morty.new['KitchenQualTA'] <- 1
+data.morty.new['BsmtQualTA'] <- 0
+
+eda_model_data.new <- data.morty.new[,names(data.zillow.lasso.best.subset)]
+y_pred.new <- predict(fit.zillow, eda_model_data.new, interval="confidence") #12.12443
+#summary(fit.zillow)
+y_pred.new <- y_pred.new^(1/0.3434343)
+```
+
+If Morty just improves his basement quality to make it excellent, he can sell his house for a maximum of 171202 USD and an average of 164156 USD.
+
+##Part 5 : Predictive modeling
+For building the Predictive model, we use `SalePrice` as y and `data.zillow` as X from Part I of our analysis. Data cleaning including outlier treatment, transformation on y and variable imputation has already been performed.  
+
+###Paramters tuning and Model selection
+All 4 models are considered for prediction: OLS, Ridge, Lasso and Elastic Net. After tuning parameters of `lambda` and `alpha`, we look at the model giving the least `MSPE`. 
+This is selected as our best model for prediction.
+We define a function to perform k-fold cross validation on all 4 models.
+```{r}
+#OLS, Ridge, Lasso and Elastic Net Methods for prediction. 
+#Elastic Net determines the best alpha, runs the model for the entire data and returns the MSPE.
+#OLS, Ridge and Lasso methods print MSPE for each fold, and the average MSPE and MSE for that method
+#Defining function for k-fold cross-validation
+kfold.cv.pred <- function(k, X, y, method) {
+  
+  #generating folds
+  folds <- split(sample(nrow(X), nrow(X), replace = F), as.factor(1:k))
+  
+  #Creating grid
+  grid.lambda <- 10^seq(10, -2, length = 100)
+  
+  #creating vectors of MSE and MSPE
+  mse <- vector(mode = "numeric", k)
+  mspe <- vector(mode = "numeric", k)
+  mspe_VL <- vector(mode = "numeric", k)
+  alpha <- vector(mode = "numeric", k)
+  
+  #performing k-fold cross validation
+  for (i in 1:k){
+    X_train <- X[-folds[[i]],]
+    y_train <- y[-folds[[i]]]
+    X_test <- X[folds[[i]],]
+    y_test <- y[folds[[i]]]
+    myDf <- data.frame(y = y_train, X_train)
+    
+    if (method == "OLS"){
+      ols.model <- lm(y ~ ., data = myDf)
+      y_train_predict <- predict(ols.model, newx = as.matrix(X_train))
+      mse[i] <- (1/length(y_train))*sum((y_train - y_train_predict)^2)
+      y_test_predict <- predict(ols.model, newx = as.matrix(X_test))
+      mspe[i] <-  (1/length(y_test))*sum((y_test - y_test_predict)^2)
+      
+      #print(paste("The MSE for method", method, "for run", i, "is:", mse[i]))
+      print(paste("The MSPE for method", method, "for run", i, "is:", mspe[i]))
+      
+    } else if (method == "Ridge"){
+      ridge.model <- glmnet(as.matrix(X_train), y_train, alpha = 0, lambda = grid.lambda)
+      
+      #Finding the best lambda
+      ridge.cv <- cv.glmnet(as.matrix(X_train), y_train, alpha = 0)
+      best_lambda <- ridge.cv$lambda.min
+      
+      #Finding MSE and MSPE
+      ridge.pred.train <- predict(ridge.model, s = best_lambda, newx = as.matrix(X_train))
+      mse[i] <- mean((ridge.pred.train - y_train)^2)
+      ridge.pred.test <- predict(ridge.model, s = best_lambda, newx = as.matrix(X_test))
+      mspe[i] <- mean((ridge.pred.test - y_test)^2)
+      
+      #print(paste("The MSE for method", method, "for run", i, "is:", mse[i]))
+      print(paste("The MSPE for method", method, "for run", i, "is:", mspe[i]))
+      
+    } else if (method == "Lasso"){
+      lasso.model <- glmnet(as.matrix(X_train), y_train, alpha = 1, lambda = grid.lambda)
+      
+      #Finding the best lambda
+      lasso.cv <- cv.glmnet(as.matrix(X_train), y_train, alpha = 1)
+      best_lambda <- lasso.cv$lambda.min
+      
+      #Finding MSE and MSPE
+      lasso.pred.train <- predict(lasso.model, s = best_lambda, newx = as.matrix(X_train))
+      mse[i] <- mean((lasso.pred.train - y_train)^2)
+      lasso.pred.test <- predict(lasso.model, s = best_lambda, newx = as.matrix(X_test))
+      mspe[i] <- mean((lasso.pred.test - y_test)^2)
+      
+      #print(paste("The MSE for method", method, "for run", i, "is:", mse[i]))
+      print(paste("The MSPE for method", method, "for run", i, "is:", mspe[i]))
+      
+    } else if (method == "Elastic Net"){
+      alphalist<-seq(0,1,by=0.1)
+      mspe_EN <- vector(mode = "numeric", 11)
+      for (j in seq(alphalist)){ 
+        EN.model <- glmnet(as.matrix(X_train), y_train, alpha = alphalist[j], lambda = grid.lambda)
+        
+        #Finding the best lambda
+        EN.cv <- cv.glmnet(as.matrix(X_train), y_train, alpha = alphalist[j])
+        best_lambda <- EN.cv$lambda.min
+        
+        #Finding MSPE
+        #EN.pred.train <- predict(EN.model, s = best_lambda, newx = as.matrix(X_train))
+        EN.pred.test <- predict(EN.model, s = best_lambda, newx = as.matrix(X_test))
+        mspe_EN[j] <- mean((EN.pred.test - y_test)^2)
+      }
+      alpha[i] <- alphalist[which.min(mspe_EN)]
+      mspe_VL[i] <- min(mspe_EN)
+    }
+  }
+  #Finding the best alpha
+  myalpha <- alpha[which.min(mspe_VL)]
+  print(myalpha)
+  
+  if (method == "Elastic Net"){
+    myDf <- data.frame(y = y, X = X)
+    EN.model.final <- glmnet(as.matrix(X), y, alpha = myalpha, lambda = grid.lambda)
+    #Finding the best lambda
+    EN.cv.final <- cv.glmnet(as.matrix(X), y, alpha = myalpha)
+    best_lambda <- EN.cv.final$lambda.min
+    
+    #Finding MSPE
+    EN.pred <- predict(EN.model.final, s = best_lambda, newx = as.matrix(X))
+    mspe.final <- mean((EN.pred - y)^2)
+    #print(paste("The MSE for method", method, "for run", i, "is:", mse[i]))
+    #print(paste("The MSPE for method", method, "for run", i, "is:", mspe[i]))
+    print(paste("The MSPE for final model by", method, "for alpha level", myalpha, "is", mspe.final))
+    return(c(myalpha, mspe.final))
+  } else {
+    print(paste("The mean of MSE for method", method, "is", mean(mse), "and the mean of MSPE is", mean(mspe)))
+  }
+}
+#Returning average MSE and MSPE for OLS, Ridge and Lasso trained over training data
+
+#Returning best alpha value and MSPE for Elastic Net Method trained over entire data 
+
+
+myvars <- kfold.cv.pred(k = 10, X = data.zillow, y = SalePrice.Org, method= "Elastic Net")
+bestalpha <- myvars[1]
+mspe.finalmodel <- myvars[2]
+
+print(paste("The best alpha value is", bestalpha))
+print(paste("The final MSPE for the Elastic Model with alpha value", bestalpha, "is", mspe.finalmodel))
+```
